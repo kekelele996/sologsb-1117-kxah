@@ -12,6 +12,7 @@ const NAV = [
   { key: '/', label: '季内授粉安排总表' },
   { key: '/orchards', label: '果园地块管理' },
   { key: '/colonies', label: '蜂群台账' },
+  { key: '/spray', label: '打药避让调度' },
   { key: '/routes', label: '转场路线规划' },
   { key: '/export', label: '导出与打印' }
 ]

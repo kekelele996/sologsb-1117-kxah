@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react'
-import { Button, Card, Col, Radio, Row, Space, Table, Tag, Typography, message } from 'antd'
+import { Alert, Button, Card, Col, Radio, Row, Space, Table, Tag, Typography, message } from 'antd'
 import dayjs from 'dayjs'
 import type { BeeColony, DropPoint, Orchard, TransitRoute } from '@/types'
 import { suggestColonyBoxes } from '@/types'
@@ -8,8 +8,10 @@ import { orchardStore } from '@/stores/orchardStore'
 import { colonyStore } from '@/stores/colonyStore'
 import { droppointStore } from '@/stores/droppointStore'
 import { routeStore } from '@/stores/routeStore'
+import { sprayStore } from '@/stores/sprayStore'
 import { downloadCsv, downloadJson } from '@/utils/export'
 import { bloomDays } from '@/utils/geo'
+import { planIsStale } from '@/utils/avoidance'
 
 interface ScheduleExportRow {
   orchard: string
@@ -31,7 +33,17 @@ export default function ExportPage(): JSX.Element {
   const colonies = usePersistentStore(colonyStore, (state) => state.rows)
   const dropPoints = usePersistentStore(droppointStore, (state) => state.rows)
   const routes = usePersistentStore(routeStore, (state) => state.rows)
+  const sprays = usePersistentStore(sprayStore, (state) => state.sprays)
+  const plans = usePersistentStore(sprayStore, (state) => state.plans)
   const [orientation, setOrientation] = useState<'portrait' | 'landscape'>('landscape')
+
+  /** 已失效（待重算）的避让方案数：重算完前不能当可执行方案导出 */
+  const stalePlanCount = useMemo(
+    () =>
+      plans.filter((plan) => planIsStale(plan, sprays.find((item) => item.id === plan.sprayId), dropPoints, colonies))
+        .length,
+    [plans, sprays, dropPoints, colonies]
+  )
 
   const orchardName = (id: string): string => orchards.find((item) => item.id === id)?.name ?? '未知地块'
 
@@ -136,7 +148,9 @@ export default function ExportPage(): JSX.Element {
       orchards,
       colonies,
       dropPoints,
-      routes
+      routes,
+      sprays,
+      plans
     })
     message.success('全量数据已导出为 JSON 备份')
   }
@@ -161,6 +175,14 @@ export default function ExportPage(): JSX.Element {
       </div>
 
       <Card size="small">
+        {stalePlanCount > 0 && (
+          <Alert
+            type="error"
+            showIcon
+            style={{ marginBottom: 12 }}
+            message={`有 ${stalePlanCount} 份打药避让方案已失效（打药日期或备用点容量等已变更），请先到「打药避让调度」重算；重算完前不能作为可执行方案导出。`}
+          />
+        )}
         <Space wrap>
           <Button type="primary" onClick={exportSchedule}>
             导出授粉安排清单（CSV）
@@ -171,6 +193,9 @@ export default function ExportPage(): JSX.Element {
           <Tag>蜂群 {colonies.length}</Tag>
           <Tag>投放点 {dropPoints.length}</Tag>
           <Tag>路线 {routes.length}</Tag>
+          <Tag color={stalePlanCount > 0 ? 'red' : 'default'}>
+            打药登记 {sprays.length} / 避让方案 {plans.length}
+          </Tag>
           <Typography.Text type="secondary" style={{ fontSize: 12 }}>
             生成时间 {dayjs().format('YYYY-MM-DD HH:mm')}
           </Typography.Text>

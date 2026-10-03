@@ -66,13 +66,13 @@ sologsb-1117/
 │   ├── nginx.conf              # try_files 前端路由回落 + gzip
 │   ├── public/favicon.svg
 │   └── src/
-│       ├── types/              # orchard.ts / colony.ts / droppoint.ts / route.ts / index.ts
-│       ├── stores/             # orchardStore / colonyStore / droppointStore / routeStore（Zustand）
+│       ├── types/              # orchard.ts / colony.ts / droppoint.ts / route.ts / spray.ts / index.ts
+│       ├── stores/             # orchardStore / colonyStore / droppointStore / routeStore / sprayStore（Zustand）
 │       ├── components/common/  # RouteMap / FlowerWindowBar / StatusTag / CoordPicker
 │       ├── hooks/              # useAmap / usePersistentStore
-│       ├── pages/              # SchedulePage / OrchardsPage / ColoniesPage / RoutesPage / ExportPage
+│       ├── pages/              # SchedulePage / OrchardsPage / ColoniesPage / SprayPage / RoutesPage / ExportPage
 │       ├── router/index.tsx
-│       └── utils/              # geo.ts / export.ts / id.ts
+│       └── utils/              # geo.ts / avoidance.ts / export.ts / id.ts
 ```
 
 ## 六、数据模型与存储
@@ -83,9 +83,12 @@ sologsb-1117/
 | BeeColony 蜂群 | 群号、蜂种、群势（足框）、箱型、当前所在地块、状态（待投放/在园/转场中/回场）、最近检查日期、健康备注 | `colonies` |
 | DropPoint 投放点 | 所属地块、坐标、编号、可容纳箱数、遮阴条件、水源距离、投放时间窗、撤场时间、责任人、安排群号 | `dropPoints` |
 | TransitRoute 转场路线 | 出发/到达投放点、预计里程与耗时、车辆类型、出发时刻、风险备注、实际记录 | `routes` |
+| SprayRecord 打药登记 | 打药地块、打药日期、安全间隔期（天）、药剂、登记人（托管队）、备注 | `sprays` |
+| AvoidancePlan 避让方案 | 对应打药登记、计算时间、输入指纹、可转回日期、逐群安排（原投放点/备用投放点/距离/缺口箱数/执行阶段） | `plans` |
 
 - 数据库名 `gbbeeroute`，`meta` 表保存 `schemaVersion`；
 - `version(2)` 升级迁移会为历史投放点补齐「可容纳箱数」（默认 8 箱）；
+- `version(3)` 新增打药登记与避让方案两张表，旧数据升级后缺的字段按默认补齐（安全间隔期默认 3 天、登记人默认「托管队」等）；
 - 数据仅存于浏览器本地，容器无状态、不挂载命名卷。
 
 ## 七、主要页面
@@ -95,6 +98,7 @@ sologsb-1117/
 | `/` | 季内授粉安排总表：花期条带 + 已投放群体，冲突（同一蜂群被排入花期重叠的不同地块）标红并汇总 |
 | `/orchards` | 果园地块管理：面积与需蜂强度自动算建议箱数、可达性标记、花期重叠提示、投放点维护（含坐标拾取） |
 | `/colonies` | 蜂群台账：按群势与状态筛选，批量改状态、批量记录检查备注 |
+| `/spray` | 打药避让调度：托管队登记打药地块/日期/安全间隔期，技术员一键算出受影响蜂群的就近备用投放点，容量不够的排队记缺口并退回托管队；按「转出→到点→（间隔期过后）转回」逐步执行，打药日期或备用点容量一改动方案即失效，重算完前禁止导出 |
 | `/routes` | 转场路线规划：地图依次选点生成顺序与里程，拖动或上下移动调整顺序并实时重算，写回路线表 |
 | `/export` | 导出授粉安排清单 / 转场路线表（CSV）、全量 JSON 备份，并提供横向/纵向打印视图 |
 
@@ -103,3 +107,4 @@ sologsb-1117/
 - 建议箱数 = ⌈面积(亩) × 需蜂强度(箱/亩)⌉，最少 1 箱；
 - 转场里程按 Haversine 球面距离累计，耗时按平均 32 km/h + 0.25 h 装卸估算；
 - 花期重叠：两地块盛花期区间交集天数 ≥ 1 即视为重叠；同一群号在重叠期内被排入两个地块 → 冲突。
+- 打药避让：受影响群 = 台账中实际所在地块为打药地块、且「在园/转场中」的群；备用点从其它地块投放点中按 Haversine 距离就近挑选，剩余容量（可容纳箱数 − 已安排群号数）不足则排队并记「还差几箱」；可转回日期 = 打药日期 + 安全间隔期；避让执行（转出/到点/转回）会同步改写蜂群状态、所在地块与投放点群号。
