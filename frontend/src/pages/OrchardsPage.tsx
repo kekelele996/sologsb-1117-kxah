@@ -9,6 +9,7 @@ import { usePersistentStore } from '@/hooks/usePersistentStore'
 import { orchardStore } from '@/stores/orchardStore'
 import { droppointStore } from '@/stores/droppointStore'
 import { colonyStore } from '@/stores/colonyStore'
+import { avoidanceStore } from '@/stores/avoidanceStore'
 import { bloomDays } from '@/utils/geo'
 import { uid } from '@/utils/id'
 
@@ -123,11 +124,21 @@ export default function OrchardsPage(): JSX.Element {
   }
 
   async function removeOrchard(orchard: Orchard): Promise<void> {
+    const sprays = avoidanceStore.getState().sprays
+    const plans = avoidanceStore.getState().plans
+    const linkedSprays = sprays.filter((item) => item.orchardId === orchard.id)
+    const openPlan = plans.find((plan) => linkedSprays.some((item) => item.id === plan.sprayId) && plan.status !== '已转回')
+    if (openPlan) {
+      message.error(`「${orchard.name}」有未完成的打药避让安排，请先在花期打药避让页处理完毕`)
+      return
+    }
     const drops = dropsOf(orchard.id)
     if (drops.length > 0) {
       message.error(`「${orchard.name}」下仍有 ${drops.length} 个投放点，请先清理投放点`)
       return
     }
+    // 无投放点且避让均已结束：连同历史打药登记一并清理
+    await Promise.all(linkedSprays.map((item) => avoidanceStore.getState().removeSpray(item.id)))
     await orchardStore.getState().remove(orchard.id)
     message.success('地块已删除')
   }

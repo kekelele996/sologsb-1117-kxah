@@ -1,15 +1,18 @@
 import { useMemo, useState } from 'react'
 import { Button, Card, Col, Radio, Row, Space, Table, Tag, Typography, message } from 'antd'
 import dayjs from 'dayjs'
-import type { BeeColony, DropPoint, Orchard, TransitRoute } from '@/types'
+import type { AvoidancePlan, BeeColony, DropPoint, Orchard, SprayRecord, TransitRoute } from '@/types'
 import { suggestColonyBoxes } from '@/types'
 import { usePersistentStore } from '@/hooks/usePersistentStore'
 import { orchardStore } from '@/stores/orchardStore'
 import { colonyStore } from '@/stores/colonyStore'
 import { droppointStore } from '@/stores/droppointStore'
 import { routeStore } from '@/stores/routeStore'
+import { avoidanceStore } from '@/stores/avoidanceStore'
 import { downloadCsv, downloadJson } from '@/utils/export'
 import { bloomDays } from '@/utils/geo'
+import { isPlanStale } from '@/utils/avoidance'
+import AvoidanceStatusTag from '@/components/common/AvoidanceStatusTag'
 
 interface ScheduleExportRow {
   orchard: string
@@ -25,15 +28,31 @@ interface ScheduleExportRow {
   owner: string
 }
 
+interface AvoidanceExportRow {
+  orchard: string
+  sprayDate: string
+  safeIntervalDays: number
+  safeDate: string
+  colonyCode: string
+  originalDrop: string
+  backupDrop: string
+  distanceKm: number
+  shortageBoxes: number
+  status: string
+}
+
 /** 导出授粉安排清单与转场路线表，并提供打印视图 */
 export default function ExportPage(): JSX.Element {
   const orchards = usePersistentStore(orchardStore, (state) => state.rows)
   const colonies = usePersistentStore(colonyStore, (state) => state.rows)
   const dropPoints = usePersistentStore(droppointStore, (state) => state.rows)
   const routes = usePersistentStore(routeStore, (state) => state.rows)
+  const sprays = usePersistentStore(avoidanceStore, (state) => state.sprays)
+  const plans = usePersistentStore(avoidanceStore, (state) => state.plans)
   const [orientation, setOrientation] = useState<'portrait' | 'landscape'>('landscape')
 
   const orchardName = (id: string): string => orchards.find((item) => item.id === id)?.name ?? '未知地块'
+  const dropCodeOf = (id: string): string => dropPoints.find((item) => item.id === id)?.code ?? '—'
 
   /** 授粉安排清单：地块 × 投放点 × 群号 */
   const scheduleRows = useMemo<ScheduleExportRow[]>(() => {
@@ -99,6 +118,56 @@ export default function ExportPage(): JSX.Element {
     [routes, dropPoints, orchards]
   )
 
+  /**
+   * 可执行避让单：重算完（未失效）、容量够、尚未转回的单。
+   * 打药日期 / 备用点容量改动后未重算完的单（stale）一律不进导出。
+   */
+  const executablePlans = useMemo(
+    () =>
+      plans.filter(
+        (plan) =>
+          plan.status !== '已转回' &&
+          plan.shortageBoxes === 0 &&
+          !isPlanStale(
+            plan,
+            sprays.find((item) => item.id === plan.sprayId),
+            dropPoints
+          )
+      ),
+    [plans, sprays, dropPoints]
+  )
+
+  const stalePlans = useMemo(
+    () =>
+      plans.filter(
+        (plan) => plan.status !== '已转回' && isPlanStale(plan, sprays.find((item) => item.id === plan.sprayId), dropPoints)
+      ),
+    [plans, sprays, dropPoints]
+  )
+
+  const avoidanceRows = useMemo<AvoidanceExportRow[]>(() => {
+    const rows: AvoidanceExportRow[] = []
+    executablePlans.forEach((plan) => {
+      const spray: SprayRecord | undefined = sprays.find((item) => item.id === plan.sprayId)
+      plan.items.forEach((item) => {
+        rows.push({
+          orchard: spray ? orchardName(spray.orchardId) : '—',
+          sprayDate: plan.sprayDate,
+          safeIntervalDays: plan.safeIntervalDays,
+          safeDate: plan.safeDate,
+          colonyCode: item.colonyCode,
+          originalDrop: item.originalDropId ? dropCodeOf(item.originalDropId) : '—',
+          backupDrop: item.backupDropId ? dropCodeOf(item.backupDropId) : '排队中',
+          distanceKm: item.distanceKm,
+          shortageBoxes: item.shortageBoxes,
+          status: plan.status
+        })
+      })
+    })
+    return rows
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [executablePlans, sprays, dropPoints, orchards])
+
   function exportSchedule(): void {
     downloadCsv('授粉安排清单.csv', scheduleRows as unknown as Record<string, unknown>[], [
       { key: 'orchard', label: '地块' },
@@ -130,13 +199,36 @@ export default function ExportPage(): JSX.Element {
     message.success('转场路线表已导出')
   }
 
+  function exportAvoidance(): void {
+    // 重算完前不能当可执行方案导出：失效单或缺口未消的单一律拦在门外
+    if (executablePlans.length === 0) {
+      message.error(stalePlans.length > 0 ? '避让安排已失效，请先在「花期打药避让」页重算完成' : '暂无可执行的避让方案')
+      return
+    }
+    downloadCsv('打药避让执行单.csv', avoidanceRows as unknown as Record<string, unknown>[], [
+      { key: 'orchard', label: '打药地块' },
+      { key: 'sprayDate', label: '打药日期' },
+      { key: 'safeIntervalDays', label: '安全间隔期(天)' },
+      { key: 'safeDate', label: '解禁日期' },
+      { key: 'colonyCode', label: '群号' },
+      { key: 'originalDrop', label: '原投放点' },
+      { key: 'backupDrop', label: '备用投放点' },
+      { key: 'distanceKm', label: '距离(km)' },
+      { key: 'shortageBoxes', label: '缺口(箱)' },
+      { key: 'status', label: '状态' }
+    ])
+    message.success(`打药避让执行单已导出（${executablePlans.length} 单 / ${avoidanceRows.length} 群）`)
+  }
+
   function exportBackup(): void {
     downloadJson('gbbeeroute-backup.json', {
       exportedAt: new Date().toISOString(),
       orchards,
       colonies,
       dropPoints,
-      routes
+      routes,
+      sprays,
+      avoidances: plans
     })
     message.success('全量数据已导出为 JSON 备份')
   }
@@ -166,11 +258,15 @@ export default function ExportPage(): JSX.Element {
             导出授粉安排清单（CSV）
           </Button>
           <Button onClick={exportRoutes}>导出转场路线表（CSV）</Button>
+          <Button onClick={exportAvoidance} disabled={executablePlans.length === 0}>
+            导出打药避让执行单（CSV）
+          </Button>
           <Button onClick={exportBackup}>导出全量 JSON 备份</Button>
           <Tag>地块 {orchards.length}</Tag>
           <Tag>蜂群 {colonies.length}</Tag>
           <Tag>投放点 {dropPoints.length}</Tag>
           <Tag>路线 {routes.length}</Tag>
+          <Tag color={stalePlans.length > 0 ? 'red' : 'default'}>避让单 {plans.length}（可执行 {executablePlans.length}）</Tag>
           <Typography.Text type="secondary" style={{ fontSize: 12 }}>
             生成时间 {dayjs().format('YYYY-MM-DD HH:mm')}
           </Typography.Text>
@@ -214,6 +310,40 @@ export default function ExportPage(): JSX.Element {
               { title: '车辆', dataIndex: 'vehicleType', key: 'vehicle', width: 100 },
               { title: '出发时刻', dataIndex: 'departAt', key: 'depart' },
               { title: '途中风险', dataIndex: 'riskNote', key: 'risk' }
+            ]}
+          />
+        </Card>
+
+        <Card
+          size="small"
+          title={`打药避让执行单（${executablePlans.length} 单可执行 · ${avoidanceRows.length} 群）`}
+          style={{ marginTop: 16 }}
+        >
+          {stalePlans.length > 0 ? (
+            <Typography.Paragraph type="danger" style={{ fontSize: 12 }}>
+              有 {stalePlans.length} 单避让安排因打药日期或备用点容量改动而失效，重算完成前不会出现在执行单里。
+            </Typography.Paragraph>
+          ) : null}
+          <Table<AvoidanceExportRow>
+            dataSource={avoidanceRows}
+            rowKey={(record, index) => `${record.colonyCode}-${record.backupDrop}-${index ?? 0}`}
+            size="small"
+            pagination={false}
+            columns={[
+              { title: '打药地块', dataIndex: 'orchard', key: 'orchard' },
+              { title: '打药日期', dataIndex: 'sprayDate', key: 'sprayDate', width: 105 },
+              { title: '解禁日期', dataIndex: 'safeDate', key: 'safeDate', width: 105 },
+              { title: '群号', dataIndex: 'colonyCode', key: 'colony', width: 80 },
+              { title: '原投放点', dataIndex: 'originalDrop', key: 'origin', width: 90 },
+              { title: '备用投放点', dataIndex: 'backupDrop', key: 'backup', width: 100 },
+              { title: '距离(km)', dataIndex: 'distanceKm', key: 'km', width: 90 },
+              {
+                title: '状态',
+                dataIndex: 'status',
+                key: 'status',
+                width: 90,
+                render: (value: AvoidancePlan['status']) => <AvoidanceStatusTag status={value} />
+              }
             ]}
           />
         </Card>

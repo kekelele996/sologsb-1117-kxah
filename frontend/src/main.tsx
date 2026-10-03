@@ -9,6 +9,7 @@ import { orchardStore } from '@/stores/orchardStore'
 import { colonyStore } from '@/stores/colonyStore'
 import { droppointStore } from '@/stores/droppointStore'
 import { routeStore } from '@/stores/routeStore'
+import { avoidanceStore } from '@/stores/avoidanceStore'
 import '@/styles/index.css'
 
 /** 启动：写入示例数据（仅首次）→ 记录 schemaVersion → 从 IndexedDB 水合全部 store */
@@ -19,6 +20,8 @@ async function bootstrap(): Promise<void> {
   await colonyStore.getState().hydrate()
   await droppointStore.getState().hydrate()
   await routeStore.getState().hydrate()
+  // 避让 store 最后水合：重算时依赖上面四张表的最新数据
+  await avoidanceStore.getState().hydrate()
 }
 
 void bootstrap()

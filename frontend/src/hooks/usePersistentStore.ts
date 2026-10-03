@@ -1,22 +1,25 @@
 import { useStore } from 'zustand'
 import type { StoreApi, UseBoundStore } from 'zustand'
 import Dexie, { type Table } from 'dexie'
-import type { BeeColony, DropPoint, Orchard, TransitRoute } from '@/types'
+import type { AvoidancePlan, BeeColony, DropPoint, Orchard, SprayRecord, TransitRoute } from '@/types'
+import { normalizePlan, normalizeSpray } from '@/types'
 
 /** IndexedDB 数据结构版本号 */
-export const SCHEMA_VERSION = 2
+export const SCHEMA_VERSION = 3
 
 export interface MetaRow {
   key: string
   value: number
 }
 
-/** Dexie 封装：果园 / 蜂群 / 投放点 / 转场路线 四张表 + 元数据表 */
+/** Dexie 封装：果园 / 蜂群 / 投放点 / 转场路线 / 打药登记 / 避让安排 六张表 + 元数据表 */
 class BeeRouteDb extends Dexie {
   orchards!: Table<Orchard, string>
   colonies!: Table<BeeColony, string>
   dropPoints!: Table<DropPoint, string>
   routes!: Table<TransitRoute, string>
+  sprays!: Table<SprayRecord, string>
+  avoidances!: Table<AvoidancePlan, string>
   meta!: Table<MetaRow, string>
 
   constructor() {
@@ -29,7 +32,7 @@ class BeeRouteDb extends Dexie {
       meta: 'key'
     })
     // v2：投放点新增「可容纳箱数」字段，迁移时为历史投放点补齐（按 8 箱兜底）
-    this.version(SCHEMA_VERSION)
+    this.version(2)
       .stores({
         orchards: 'id, name, crop, bloomStart',
         colonies: 'id, code, status, currentOrchardId',
@@ -47,6 +50,31 @@ class BeeRouteDb extends Dexie {
             }
           })
       })
+    // v3：新增打药登记与避让安排两张表；旧数据缺字段统一按默认补齐
+    this.version(SCHEMA_VERSION)
+      .stores({
+        orchards: 'id, name, crop, bloomStart',
+        colonies: 'id, code, status, currentOrchardId',
+        dropPoints: 'id, orchardId, code, dropWindow',
+        routes: 'id, fromDropId, toDropId, departAt',
+        sprays: 'id, orchardId, sprayDate',
+        avoidances: 'id, sprayId, status, stale',
+        meta: 'key'
+      })
+      .upgrade(async (tx) => {
+        await tx
+          .table<Partial<SprayRecord>, string>('sprays')
+          .toCollection()
+          .modify((row) => {
+            Object.assign(row, normalizeSpray(row))
+          })
+        await tx
+          .table<Partial<AvoidancePlan>, string>('avoidances')
+          .toCollection()
+          .modify((row) => {
+            Object.assign(row, normalizePlan(row))
+          })
+      })
   }
 }
 
@@ -57,9 +85,21 @@ export async function stampDbVersion(): Promise<void> {
   await db.meta.put({ key: 'schemaVersion', value: SCHEMA_VERSION })
 }
 
-/** 读取整表 */
+/** 读取整表（读时再兜底一次默认值，覆盖未经升级事务的历史数据） */
 export async function loadAll<T extends object>(table: Table<T, string>): Promise<T[]> {
   return table.toArray()
+}
+
+/** 读取打药登记表并补齐缺失字段 */
+export async function loadSprays(): Promise<SprayRecord[]> {
+  const rows = await db.sprays.toArray()
+  return rows.map((row) => normalizeSpray(row))
+}
+
+/** 读取避让安排表并补齐缺失字段 */
+export async function loadAvoidances(): Promise<AvoidancePlan[]> {
+  const rows = await db.avoidances.toArray()
+  return rows.map((row) => normalizePlan(row))
 }
 
 /** 写入一条记录 */
@@ -232,6 +272,17 @@ export async function seedDemoData(): Promise<void> {
       departAt: `${year}-04-13T06:30`,
       riskNote: '西沟坡道窄，雨天泥泞，需小车倒运',
       actualNote: '待执行'
+    }
+  ])
+
+  // 花期临时打药登记示例：北岭苹果园 4/15 打药，安全间隔期 7 天 → 4/22 解禁
+  await db.sprays.bulkPut([
+    {
+      id: 'sp_001',
+      orchardId: 'orc_ap',
+      sprayDate: `${year}-04-15`,
+      safeIntervalDays: 7,
+      note: '吡虫啉，花后临时补防蚜虫（托管队登记）'
     }
   ])
 }
